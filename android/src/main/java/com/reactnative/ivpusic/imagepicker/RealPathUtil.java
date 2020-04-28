@@ -1,5 +1,6 @@
 package com.reactnative.ivpusic.imagepicker;
 
+
 import android.annotation.TargetApi;
 import android.content.ContentUris;
 import android.content.Context;
@@ -9,20 +10,25 @@ import android.os.Build;
 import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
+import android.os.AsyncTask;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
+
+
 class RealPathUtil {
     @TargetApi(Build.VERSION_CODES.KITKAT)
-    static String getRealPathFromURI(final Context context, final Uri uri) throws IOException {
+    String getRealPathFromURI(final Context context, final Uri uri) throws IOException {
 
-        final boolean isKitKat = Build.VERSION.SDK_INT == Build.VERSION_CODES.KITKAT;
+        final boolean isKitKat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT;
 
         // DocumentProvider
         if (isKitKat && DocumentsContract.isDocumentUri(context, uri)) {
+
+            
             // ExternalStorageProvider
             if (isExternalStorageDocument(uri)) {
                 final String docId = DocumentsContract.getDocumentId(uri);
@@ -50,10 +56,17 @@ class RealPathUtil {
             // DownloadsProvider
             else if (isDownloadsDocument(uri)) {
                 final String id = DocumentsContract.getDocumentId(uri);
-                final Uri contentUri = ContentUris.withAppendedId(
+                try{
+                    final Uri contentUri = ContentUris.withAppendedId(
                         Uri.parse("content://downloads/public_downloads"), Long.valueOf(id));
-
-                return getDataColumn(context, contentUri, null, null);
+                        
+                    return getDataColumn(context, contentUri, null, null);
+                } catch(Exception e){
+                    final String[] split = id.split(":");
+                    return split[1];
+                }
+                
+                
             }
             // MediaProvider
             else if (isMediaDocument(uri)) {
@@ -76,7 +89,14 @@ class RealPathUtil {
                 };
 
                 return getDataColumn(context, contentUri, selection, selectionArgs);
+
+            } else if(isGoogleDrive(uri)){
+                return getDataColumnFromRemoteFile(context, uri, null, null); 
+            } else {
+                return getDataColumnFromRemoteFile(context, uri, null, null);
             }
+        } else if(isKitKat){
+            return getDataColumnFromRemoteFile(context, uri, null, null);
         }
         // MediaStore (and general)
         else if ("content".equalsIgnoreCase(uri.getScheme())) {
@@ -84,11 +104,13 @@ class RealPathUtil {
             if (isGooglePhotosUri(uri))
                 return uri.getLastPathSegment();
             return getDataColumn(context, uri, null, null);
+            //return uri.getPath();
         }
         // File
         else if ("file".equalsIgnoreCase(uri.getScheme())) {
             return uri.getPath();
         }
+        
 
         return null;
     }
@@ -102,15 +124,17 @@ class RealPathUtil {
      * @param uri file's URI
      * @return file that has been written
      */
-    private static File writeToFile(Context context, String fileName, Uri uri) {
-        String tmpDir = context.getCacheDir() + "/react-native-image-crop-picker";
+    synchronized File writeToFile(final Context context, String fileName, final Uri uri) {
+        String tmpDir = context.getCacheDir() + "/documents";
         Boolean created = new File(tmpDir).mkdir();
         fileName = fileName.substring(fileName.lastIndexOf('/') + 1);
         File path = new File(tmpDir);
-        File file = new File(path, fileName);
+        final File file = new File(path, fileName);
+        
         try {
+
             FileOutputStream oos = new FileOutputStream(file);
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[10240];
             InputStream is = context.getContentResolver().openInputStream(uri);
             int c = 0;
             while ((c = is.read(buf, 0, buf.length)) > 0) {
@@ -119,10 +143,13 @@ class RealPathUtil {
             }
             oos.close();
             is.close();
+            
         } catch (Exception e) {
             e.printStackTrace();
         }
+        
         return file;
+        
     }
 
     /**
@@ -135,6 +162,8 @@ class RealPathUtil {
      * @param selectionArgs (Optional) Selection arguments used in the query.
      * @return The value of the _data column, which is typically a file path.
      */
+
+    /*
     private static String getDataColumn(Context context, Uri uri, String selection,
                                         String[] selectionArgs) {
 
@@ -151,6 +180,7 @@ class RealPathUtil {
                 // Fall back to writing to file if _data column does not exist
                 final int index = cursor.getColumnIndex(MediaStore.MediaColumns.DATA);
                 String path = index > -1 ? cursor.getString(index) : null;
+                
                 if (path != null) {
                     return cursor.getString(index);
                 } else {
@@ -166,7 +196,68 @@ class RealPathUtil {
         }
         return null;
     }
+    */
 
+
+     private final String getDataColumnFromRemoteFile(Context context, Uri uri, String selection,
+                                        String[] selectionArgs) {
+
+
+        Cursor cursor = null;
+        final String[] projection = {
+                MediaStore.MediaColumns.DATA,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+        };
+
+        try {
+            
+            cursor = context.getContentResolver().query(uri, projection, selection, selectionArgs,
+                    null);
+            if (cursor != null && cursor.moveToFirst()) {
+                // Fall back to writing to file if _data column does not exist
+                final int index = cursor.getColumnIndex(MediaStore.MediaColumns.DATA);
+                String path = index > -1 ? cursor.getString(index) : null;
+                
+                if (path != null) {
+                    return cursor.getString(index);
+                } else {
+                    final int indexDisplayName = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
+                    String fileName = cursor.getString(indexDisplayName);
+                    File fileWritten = writeToFile(context, fileName, uri);
+                    return fileWritten.getAbsolutePath();
+                    }
+            }
+        } catch(Exception e ){
+
+        } finally {
+            if (cursor != null)
+                cursor.close();
+        }
+        return null;
+    }
+
+public static String getDataColumn(Context context, Uri uri, String selection,
+                                       String[] selectionArgs) {
+
+        Cursor cursor = null;
+        final String column = "_data";
+        final String[] projection = {
+                column
+        };
+
+        try {
+            cursor = context.getContentResolver().query(uri, projection, selection, selectionArgs,
+                    null);
+            if (cursor != null && cursor.moveToFirst()) {
+                final int index = cursor.getColumnIndexOrThrow(column);
+                return cursor.getString(index);
+            }
+        } finally {
+            if (cursor != null)
+                cursor.close();
+        }
+        return null;
+    }
 
     /**
      * @param uri The Uri to check.
@@ -198,6 +289,16 @@ class RealPathUtil {
      */
     private static boolean isGooglePhotosUri(Uri uri) {
         return "com.google.android.apps.photos.content".equals(uri.getAuthority());
+    }
+
+
+    /**
+     * @param uri The Uri to check.
+     * @return Whether the Uri authority is GoogleDrive.
+     */
+
+    public static boolean isGoogleDrive(Uri uri) {
+        return uri.getAuthority().equalsIgnoreCase("com.google.android.apps.docs.storage");
     }
 
     @TargetApi(Build.VERSION_CODES.KITKAT)
