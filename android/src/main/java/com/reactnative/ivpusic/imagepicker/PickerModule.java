@@ -1,9 +1,9 @@
 package com.reactnative.ivpusic.imagepicker;
 
 import android.Manifest;
+import android.content.ContentResolver;
 import android.app.Activity;
 import android.content.ClipData;
-import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -16,7 +16,6 @@ import android.os.Environment;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.webkit.MimeTypeMap;
-
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.FileProvider;
 
@@ -47,9 +46,16 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 class PickerModule extends ReactContextBaseJavaModule implements ActivityEventListener {
 
+    private static LinkedBlockingQueue<Runnable> taskQueue = new LinkedBlockingQueue<>();
+    private static ThreadPoolExecutor threadPool = new ThreadPoolExecutor(5, 10, 5000, TimeUnit.MILLISECONDS, taskQueue);
+
+    
     private static final int IMAGE_PICKER_REQUEST = 61110;
     private static final int CAMERA_PICKER_REQUEST = 61111;
     private static final String E_ACTIVITY_DOES_NOT_EXIST = "E_ACTIVITY_DOES_NOT_EXIST";
@@ -95,8 +101,9 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
 
     private Uri mCameraCaptureURI;
     private String mCurrentMediaPath;
-    private ResultCollector resultCollector = new ResultCollector();
+    private static ResultCollector resultCollector = new ResultCollector();
     private Compression compression = new Compression();
+    private RealPathUtil realPathUtil = new RealPathUtil();
     private ReactApplicationContext reactContext;
 
     PickerModule(ReactApplicationContext reactContext) {
@@ -106,7 +113,7 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
     }
 
     private String getTmpDir(Activity activity) {
-        String tmpDir = activity.getCacheDir() + "/react-native-image-crop-picker";
+        String tmpDir = activity.getCacheDir() + "/documents";
         new File(tmpDir).mkdir();
 
         return tmpDir;
@@ -335,7 +342,6 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         } catch (Exception e) {
             resultCollector.notifyProblem(E_FAILED_TO_OPEN_CAMERA, e);
         }
-
     }
 
     private void initiatePicker(final Activity activity) {
@@ -348,8 +354,8 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
                 galleryIntent.setType("video/*");
             } else {
                 galleryIntent.setType("*/*");
-                String[] mimetypes = {"image/*", "video/*"};
-                galleryIntent.putExtra(Intent.EXTRA_MIME_TYPES, mimetypes);
+                //String[] mimetypes = {"image/*", "video/*"};
+                //galleryIntent.putExtra(Intent.EXTRA_MIME_TYPES, mimetypes);
             }
 
             galleryIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -375,7 +381,8 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         setConfiguration(options);
         resultCollector.setup(promise, multiple);
 
-        permissionsCheck(activity, promise, Collections.singletonList(Manifest.permission.WRITE_EXTERNAL_STORAGE), new Callable<Void>() {
+        permissionsCheck(activity, promise, Collections.singletonList(Manifest.permission.WRITE_EXTERNAL_STORAGE), 
+        new Callable<Void>() {
             @Override
             public Void call() {
                 initiatePicker(activity);
@@ -396,6 +403,8 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         setConfiguration(options);
         resultCollector.setup(promise, false);
 
+        //Uri uri = Uri.parse(options.getString("path"));
+        //startCropping(activity, uri);
         final Uri uri = Uri.parse(options.getString("path"));
         permissionsCheck(activity, promise, Collections.singletonList(Manifest.permission.WRITE_EXTERNAL_STORAGE), new Callable<Void>() {
             @Override
@@ -456,28 +465,57 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         }
 
         String mime = getMimeType(path);
+         return getFile(activity, path, mime);
+        /*
         if (mime != null && mime.startsWith("video/")) {
             getVideo(activity, path, mime);
             return null;
+            return getFile(activity, path, mime);
+        } else if(mime != null && mime.startsWith("image/")){
+            return getImage(activity, path);
+        } else {
+            return getFile(activity, path, mime);
         }
+        */
 
-        return getImage(activity, path);
+        
     }
 
-    private void getAsyncSelection(final Activity activity, Uri uri, boolean isCamera) throws Exception {
-        String path = resolveRealPath(activity, uri, isCamera);
-        if (path == null || path.isEmpty()) {
-            resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, "Cannot resolve asset path.");
-            return;
-        }
+    private void getAsyncSelection(final Activity activity, final Uri uri, final boolean isCamera) throws Exception {
+        
+        
+        threadPool.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        try{
+                            String path = resolveRealPath(activity, uri, isCamera);
+                            //resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, path);
+                            if (path == null || path.isEmpty()) {
+                                resultCollector.notifyProblem(E_NO_IMAGE_DATA_FOUND, "Cannot resolve asset path.");
+                                return;
+                            }
+                            String mime = getMimeType(path);
+                            resultCollector.notifySuccess(getFile(activity, path, mime));
+                            
+                        } catch(Exception e){
 
-        String mime = getMimeType(path);
+                        }
+                    }
+                });
+
+        
+        /*
         if (mime != null && mime.startsWith("video/")) {
             getVideo(activity, path, mime);
             return;
+        } else if(mime != null && mime.startsWith("image/")){
+            resultCollector.notifySuccess(getImage(activity, path));
+        } else {
+            resultCollector.notifySuccess(getFile(activity, path, mime));
         }
+        */
 
-        resultCollector.notifySuccess(getImage(activity, path));
+        
     }
 
     private Bitmap validateVideo(String path) throws Exception {
@@ -536,13 +574,13 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         String path;
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
-            path = RealPathUtil.getRealPathFromURI(activity, uri);
+            path = realPathUtil.getRealPathFromURI(activity, uri);
         } else {
             if (isCamera) {
                 Uri mediaUri = Uri.parse(mCurrentMediaPath);
                 path = mediaUri.getPath();
             } else {
-                path = RealPathUtil.getRealPathFromURI(activity, uri);
+                path = realPathUtil.getRealPathFromURI(activity, uri);
             }
         }
 
@@ -602,6 +640,28 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         return image;
     }
 
+    // Fonction permet de retourner un autre de type de fichier que l'image et le video
+    private WritableMap getFile(final Activity activity, String path, String mime) throws Exception {
+        WritableMap file = new WritableNativeMap();
+
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+            throw new Exception("Cannot select remote files");
+        }
+
+        long modificationDate = new File(path).lastModified();
+
+        file.putString("path", "file://" + path);
+        file.putInt("width", 0);
+        file.putInt("height", 0);
+        file.putString("mime", mime);
+        file.putInt("size", (int) new File(path).length());
+        file.putString("modificationDate", String.valueOf(modificationDate));
+
+        
+        return file;
+
+    }
+
     private void configureCropperColors(UCrop.Options options) {
         int activeWidgetColor = Color.parseColor(cropperActiveWidgetColor);
         int toolbarColor = Color.parseColor(cropperToolbarColor);
@@ -620,7 +680,7 @@ class PickerModule extends ReactContextBaseJavaModule implements ActivityEventLi
         }
     }
 
-    private void startCropping(final Activity activity, final Uri uri) {
+    private void startCropping(final Activity activity,final Uri uri) {
         UCrop.Options options = new UCrop.Options();
         options.setCompressionFormat(Bitmap.CompressFormat.JPEG);
         options.setCompressionQuality(100);
