@@ -3,9 +3,3 @@ example
 node_modules
 build
 images
-
-# android studio
-*.iml
-.idea
-.gradle
-build/
